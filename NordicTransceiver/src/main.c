@@ -4,6 +4,7 @@
 #include "pinout.h"
 #include "nRF24L01P.h"
 #include "xprintf.h"
+#include <stdbool.h>
 
 /**
  * The Systick handler is used for a lot more tasks than sensor timing.
@@ -22,12 +23,17 @@ void SysTick_Handler(void) {
 	}
 }
 
-char RFreception[NRF24L01P_RX_FIFO_SIZE + 1];
+int throughMode = 0;
+static unsigned char buffer[64];
+static unsigned char fakeEvent[2];
 
 int main(void) {
+
+	unsigned short eventCounter = 0;
 	UARTsInit();
 	UARTShowVersion();
-	nRF24L01PInit();
+	nRF24L01P.transmissionTimeout = -1;
+	nRF24L01P.mode = NRF24L01P_MODE_UNKNOWN;
 	Chip_GPIO_SetPinOutHigh(LPC_GPIO, LED_PORT, LED_PIN);
 	Chip_GPIO_SetPinDIROutput(LPC_GPIO, LED_PORT, LED_PIN);
 
@@ -38,56 +44,34 @@ int main(void) {
 	SysTick->LOAD = load;
 	SysTick->CTRL |= 0x7;	//enable the Systick
 	while (1) {
-		if (RingBuffer_GetCount(&uart0RX)) {
-			UART0ParseNewChar();
+		int count = RingBuffer_GetCount(&uart0RX);
+		if (count) {
+			if (throughMode) {
+				if (count > 64) {
+					count = 64;
+				}
+				RingBuffer_PopMult(&uart0RX, buffer, 64);
+				if (RFpushDataToBuffer(buffer, count)) {
+					//TODO: handle this data that couldn't fit
+				}
+			} else {
+				UART0ParseNewChar();
+			}
 		}
+#if 1
+		if (throughMode == 2) {
+			++eventCounter;
+			fakeEvent[0] = (eventCounter & 127) | 0x80;
+			fakeEvent[1] = eventCounter >> 8;
+			RFpushDataToBuffer(fakeEvent, 2);
+		}
+#endif
 		if (toggleLed0) {
 			toggleLed0 = 0;
 			Chip_GPIO_SetPinToggle(LPC_GPIO, LED_PORT, LED_PIN);
 		}
-		if (nRF24L01P.transmissionTimeout == 0) {
-			RFmoveBufferToTransmission(NRF24L01P_PIPE_P0);
-			nRF24L01P.transmissionTimeout = -1;
-		}
-		//New nordic interrupt active low
-		if (Chip_GPIO_ReadPortBit(LPC_GPIO, NORDIC_IRQ_PORT, NORDIC_IRQ_PIN) == 0) {
-			int status = RFgetStatusRegister();
-			if (status & NRF24L01P_STATUS_TX_DS) {
-				//xputs("Finished tx\n");
-				RFsetRegister(NRF24L01P_REG_STATUS, NRF24L01P_STATUS_TX_DS);
-				if (nRF24L01P.mode & NRF24L01P_MODE_RX) {
-					nRF24L01P.ACKPayloadsinTXFIFO--; // If we are receiving, this interrupt indicates a
-				}
-				if (RFisTXBufferEmpty()) {
-					RFsetNormalMode();
-				} else {
-					RFmoveBufferToTransmission(NRF24L01P_PIPE_P0);
-				}
-			}
-			if (status & NRF24L01P_STATUS_MAX_RT) {
-				//xputs("Retx limit\n");
-				RFsetRegister(NRF24L01P_REG_STATUS, NRF24L01P_STATUS_MAX_RT);
-				if (RFisTXBufferEmpty()) {
-					RFsetNormalMode();
-				} else {
-					RFmoveBufferToTransmission(NRF24L01P_PIPE_P0);
-				}
-			}
-			if (status & NRF24L01P_STATUS_RX_DR) {
-				//xputs("new packet\n");
-				do {
-					int rxPayloadsize = RFgetRXPayloadSize();
-					if (rxPayloadsize < 0) {
-						RFFlushRXFIFO();
-					} else {
-						RFRXFIFOread(RFreception, rxPayloadsize);
-						RFreception[rxPayloadsize] = '\0';
-						xputs(RFreception);
-						xputc('\n');
-					}
-					RFsetRegister(NRF24L01P_REG_STATUS, NRF24L01P_STATUS_RX_DR);
-				} while (!RFisRXFIFOEmpty());
-			}
+		if (throughMode) {
+			RFiterate();
 		}
 	}
 	return 0;

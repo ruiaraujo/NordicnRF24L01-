@@ -129,6 +129,8 @@ static char nordictxBufferArray[TX_BUFFER_SIZE];
 static uint8_t spiBufferTx[NRF24L01P_TX_FIFO_SIZE + 1];
 static uint8_t spiBufferRx[NRF24L01P_RX_FIFO_SIZE + 1];
 
+static char RFreception[NRF24L01P_RX_FIFO_SIZE + 1];
+
 void writeToSPI(int length) {
 	spi.length = length;
 	spi.rx_cnt = 0;
@@ -142,7 +144,7 @@ void writeToSPI(int length) {
 /**
  * Methods
  */
-void nRF24L01PInit() {
+void nRF24L01PInit(unsigned char transmitMode) {
 
 	Chip_GPIO_SetPinOutHigh(LPC_GPIO, CSN_PORT, CSN_PIN);
 	Chip_GPIO_SetPinDIROutput(LPC_GPIO, CSN_PORT, CSN_PIN);
@@ -151,12 +153,12 @@ void nRF24L01PInit() {
 	Chip_GPIO_SetPinDIRInput(LPC_GPIO, NORDIC_IRQ_PORT, NORDIC_IRQ_PIN);
 	nRF24L01P.mode = NRF24L01P_MODE_UNKNOWN;
 	nRF24L01P.transmissionTimeout = -1;
-	nRF24L01P.ACKPayloadsinTXFIFO = 0;
+	nRF24L01P.payloadsinTXFIFO = 0;
 	RFdisable();
 	Chip_Clock_EnablePeriphClock(SYSCTL_CLOCK_SSP1);
 	Chip_SSP_Set_Mode(LPC_SSP1, SSP_MODE_MASTER);
 	Chip_SSP_SetFormat(LPC_SSP1, SSP_BITS_8, SSP_FRAMEFORMAT_SPI, SSP_CLOCK_CPHA0_CPOL0); // 8-bit, ClockPhase = 0, ClockPolarity = 0
-	Chip_SSP_SetBitRate(LPC_SSP1, NRF24L01P_SPI_MAX_DATA_RATE / 5); // 2Mbit, 1/5th the maximum transfer rate for the SPI bus
+	Chip_SSP_SetBitRate(LPC_SSP1, NRF24L01P_SPI_MAX_DATA_RATE / 2); // 2Mbit, 1/5th the maximum transfer rate for the SPI bus
 	Chip_SSP_Enable(LPC_SSP1);
 
 	RingBuffer_Init(&nordicTxBuffer, nordictxBufferArray, 1, TX_BUFFER_SIZE);
@@ -170,6 +172,7 @@ void nRF24L01PInit() {
 	RFsetRegister(NRF24L01P_REG_STATUS, NRF24L01P_STATUS_MAX_RT | NRF24L01P_STATUS_TX_DS | NRF24L01P_STATUS_RX_DR);  // Clear any pending interrupts
 	RFsetRegister(NRF24L01P_REG_FEATURE, NRF24L01P_EN_DYN_ACK | NRF24L01P_EN_ACK_PAY | NRF24L01P_EN_DPL); //Enabled no ack packages
 	RFsetRegister(NRF24L01P_REG_DYNPD, NRF24L01P_DPL_P0);
+	RFsetRegister(NRF24L01P_REG_RF_SETUP, 0); // Clear this register
 	//
 	// Setup default configuration
 	//
@@ -185,10 +188,55 @@ void nRF24L01PInit() {
 	RFenableAutoAcknowledge(NRF24L01P_PIPE_P0);
 	RFsetTransferSize(DEFAULTNRF24L01P_TRANSFER_SIZE, NRF24L01P_PIPE_P0);
 	nRF24L01P.mode = NRF24L01P_MODE_POWER_DOWN;
-	RFsetReceiveMode();
+	if (transmitMode) {
+		RFsetTransmitMode();
+	} else {
+		RFsetReceiveMode();
+	}
 	RFenable();
 }
 
+void RFiterate() {
+
+	if (nRF24L01P.transmissionTimeout == 0) {
+		RFmoveBufferToTransmission(NRF24L01P_PIPE_P0);
+		nRF24L01P.transmissionTimeout = -1;
+	}
+	//New nordic interrupt active low
+	if (Chip_GPIO_ReadPortBit(LPC_GPIO, NORDIC_IRQ_PORT, NORDIC_IRQ_PIN) == 0) {
+		int status = RFgetStatusRegister();
+		if (status & NRF24L01P_STATUS_TX_DS) {
+			//xputs("Finished tx\n");
+			RFsetRegister(NRF24L01P_REG_STATUS, NRF24L01P_STATUS_TX_DS);
+			nRF24L01P.payloadsinTXFIFO--;
+			if (!RFisTXBufferEmpty()) {
+				RFmoveBufferToTransmission(NRF24L01P_PIPE_P0);
+			}
+		}
+		if (status & NRF24L01P_STATUS_MAX_RT) {
+			xputs("Retx limit\n");
+			RFsetRegister(NRF24L01P_REG_STATUS, NRF24L01P_STATUS_MAX_RT);
+			nRF24L01P.payloadsinTXFIFO--;
+			if (!RFisTXBufferEmpty()) {
+				RFmoveBufferToTransmission(NRF24L01P_PIPE_P0);
+			}
+		}
+		if (status & NRF24L01P_STATUS_RX_DR) {
+			//xputs("new packet\n");
+			do {
+				int rxPayloadsize = RFgetRXPayloadSize();
+				if (rxPayloadsize < 0) {
+					RFFlushRXFIFO();
+				} else {
+					RFRXFIFOread(RFreception, rxPayloadsize);
+					RFreception[rxPayloadsize] = '\0';
+					xputs(RFreception);
+				}
+				RFsetRegister(NRF24L01P_REG_STATUS, NRF24L01P_STATUS_RX_DR);
+			} while (!RFisRXFIFOEmpty());
+		}
+	}
+}
 void RFpowerUp(void) {
 	int config = RFgetRegister(NRF24L01P_REG_CONFIG);
 	config |= NRF24L01P_CONFIG_PWR_UP;
@@ -421,7 +469,7 @@ void RFenableAutoAcknowledge(int pipe) {
 	RFsetRegister(NRF24L01P_REG_EN_AA, enAA);
 }
 
-void RFenableACKTX(bool enable) {
+void RFenableNoACKTX(bool enable) {
 	if (enable) {
 		nRF24L01P.mode |= NRF24L01P_MODE_TX_NO_ACK;
 	} else {
@@ -612,14 +660,6 @@ bool RFreadable(int pipe) {
 	return ((status & NRF24L01P_STATUS_RX_DR) && (((status & NRF24L01P_STATUS_RX_P_NO) >> 1) == (pipe & 0x7)));
 }
 
-void RFsetNormalMode() {
-	nRF24L01P.mode &= ~NRF24L01P_MODE_TRANSMITTING;
-}
-
-void RFsetTransmittingMode() {
-	nRF24L01P.mode |= NRF24L01P_MODE_TRANSMITTING;
-}
-
 void RFretransmistLastPayload() {
 	spiBufferTx[0] = NRF24L01P_SPI_CMD_REUSE_TX_PL;
 	writeToSPI(1);
@@ -661,17 +701,22 @@ void RFRXFIFOread(char *data, int count) {
 }
 
 int RFpushDataToBuffer(unsigned char *data, int count) {
-	int ret = RingBuffer_InsertMult(&nordicTxBuffer, data, count);
-	//If the buffer has enough data to be sent, send it right away
-	if (RingBuffer_GetCount(&nordicTxBuffer) >= NRF24L01P_TX_FIFO_SIZE && (nRF24L01P.mode & NRF24L01P_MODE_TRANSMITTING) == 0) {
-		RFmoveBufferToTransmission(NRF24L01P_PIPE_P0);
-		RFsetTransmittingMode();
-	}
+	int ret = 0;
 	/* Add additional data to transmit ring buffer if possible */
-	if (ret != count) {
-		ret += RingBuffer_InsertMult(&nordicTxBuffer, (data + ret), (count - ret));
+	while (ret < count) {
+		int inserted = RingBuffer_InsertMult(&nordicTxBuffer, (data + ret), (count - ret));
+		if (inserted == 0) {
+			break;
+		}
+		ret += inserted;
+		//If the buffer has enough data to be sent, try to send it right away
+		while (RingBuffer_GetCount(&nordicTxBuffer) >= NRF24L01P_TX_FIFO_SIZE) {
+			if (!RFmoveBufferToTransmission(NRF24L01P_PIPE_P0)) {
+				break;
+			}
+		}
 	}
-	if (RingBuffer_GetCount(&nordicTxBuffer) > 0 && (nRF24L01P.mode & NRF24L01P_MODE_TRANSMITTING) == 0) {
+	if (RingBuffer_GetCount(&nordicTxBuffer) > 0) {
 		//If there is data to be sent, start a timeout for transmission
 		//If there was a previous transmission no need to do this
 		if (nRF24L01P.mode & NRF24L01P_MODE_TX) {
@@ -680,107 +725,47 @@ int RFpushDataToBuffer(unsigned char *data, int count) {
 			nRF24L01P.transmissionTimeout = NRF24L01P_TX_TIMEOUT_ACK;
 		}
 	}
-	return ret;
+	return count - ret;
 }
 
 bool RFisTXBufferEmpty() {
 	return RingBuffer_GetCount(&nordicTxBuffer) == 0;
 }
 
-void RFmoveBufferToTransmission(int pipe) {
+bool RFmoveBufferToTransmission(int pipe) {
+	if (nRF24L01P.payloadsinTXFIFO >= NRF24L01P_TX_FIFO_COUNT) {
+		return false; //We have pushed the maximum amount of payload to the Nordic in RX mode
+	}
 	int count = RingBuffer_GetCount(&nordicTxBuffer);
 	if (nRF24L01P.mode & NRF24L01P_MODE_TX) {
 		if (count > NRF24L01P_TX_FIFO_SIZE) {
 			count = NRF24L01P_TX_FIFO_SIZE;
 		}
-		if ( nRF24L01P.mode & NRF24L01P_MODE_TX_NO_ACK ){
+		if (nRF24L01P.mode & NRF24L01P_MODE_TX_NO_ACK) {
 			spiBufferTx[0] = NRF24L01P_SPI_CMD_W_TX_PYLD_NO_ACK;
-		}else{
+		} else {
 			spiBufferTx[0] = NRF24L01P_SPI_CMD_WR_TX_PAYLOAD;
 		}
 	} else {
 		if ((pipe < NRF24L01P_PIPE_P0) || (pipe > NRF24L01P_PIPE_P5)) {
 			xprintf("nRF24L01P: Invalid read pipe number %d\r\n", pipe);
-			return;
-		}
-		if (nRF24L01P.ACKPayloadsinTXFIFO >= NRF24L01P_TX_FIFO_COUNT) {
-			return; //We have pushed the maximum amount of payload to the Nordic in RX mode
+			return false;
 		}
 		if (count > NRF24L01P_TX_ACK_FIFO_SIZE) {
 			count = NRF24L01P_TX_ACK_FIFO_SIZE;
 		}
 		spiBufferTx[0] = NRF24L01P_SPI_CMD_W_ACK_PAYLOAD | (pipe & 0x7);
-		nRF24L01P.ACKPayloadsinTXFIFO++;
 	}
 	RingBuffer_PopMult(&nordicTxBuffer, spiBufferTx + 1, count);
-	RFsetTransmittingMode();
 	writeToSPI(count + 1);
-}
-
-int RFsimple_read(int pipe, char *data, int count) {
-	if ((pipe < NRF24L01P_PIPE_P0) || (pipe > NRF24L01P_PIPE_P5)) {
-		xprintf("nRF24L01P: Invalid read pipe number %d\r\n", pipe);
-		return -1;
-	}
-
-	if (count <= 0)
-		return 0;
-
-	if (count > NRF24L01P_RX_FIFO_SIZE)
-		count = NRF24L01P_RX_FIFO_SIZE;
-
-	if (RFreadable(pipe)) {
-		int rxPayloadWidth = RFgetRXPayloadSize();
-
-		if (rxPayloadWidth < 0) {
-			// Received payload error: need to flush the FIFO
-			RFFlushRXFIFO();
-			// At this point, we should retry the reception,
-			//  but for now we'll just fall through...
-			//
-
-		} else {
-			if (rxPayloadWidth < count)
-				count = rxPayloadWidth;
-			RFRXFIFOread(data, count);
-			// Clear the Status bit
-			RFsetRegister(NRF24L01P_REG_STATUS, NRF24L01P_STATUS_RX_DR);
-			return count;
-		}
-	} else {
-		//
-		// What should we do if there is no 'readable' data?
-		//  We could wait for data to arrive, but for now, we'll
-		//  just return with no data.
-		//
-		return 0;
-	}
-
-	//
-	// We get here because an error condition occured;
-	//  We could wait for data to arrive, but for now, we'll
-	//  just return with no data.
-	//
-	return -1;
-
+	nRF24L01P.payloadsinTXFIFO++;
+	return true;
 }
 
 void RFsetRegister(int regAddress, int regData) {
-	//
-	// Save the CE state
-	//
-	int originalCe = Chip_GPIO_ReadPortBit(LPC_GPIO, NORDIC_CE_PORT, NORDIC_CE_PIN);
-	RFdisable();
 	spiBufferTx[0] = (NRF24L01P_SPI_CMD_WR_REG | (regAddress & NRF24L01P_REG_ADDRESS_MASK));
 	spiBufferTx[1] = regData & 0xFF;
 	writeToSPI(2);
-
-	if (originalCe) {
-		RFenable();
-	} else {
-		RFdisable();
-	}
-	timerDelayUs( NRF24L01P_TIMING_Tpece2csn_us);
 }
 
 int RFgetRegister(int regAddress) {

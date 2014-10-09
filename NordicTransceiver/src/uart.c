@@ -81,9 +81,12 @@ static void UARTShowUsage(void) {
 	xputs("Supported Commands:\n");
 	UARTReturn();
 
-	xputs(" !I                - init Nordic\n");
-	xputs(" !It               - set Transmit mode\n");
-	xputs(" !Tx               - transmit x\n");
+	xputs(" !I                  - init Nordic receptor\n");
+	xputs(" !I1                 - init Nordic receptor in no ack mode\n");
+	UARTReturn();
+
+	xputs(" !It                 - init Nordic transmitter\n");
+	xputs(" !It1                - init Nordic transmitter in no ack mode\n");
 	UARTReturn();
 
 	xputs(" !U=x                - set baud rate to x\n");
@@ -120,6 +123,8 @@ static void UARTParseGetCommand(void) {
 	}
 }
 
+extern int throughMode;
+
 // *****************************************************************************
 // * ** parseSetCommand ** */
 // *****************************************************************************
@@ -127,18 +132,23 @@ static void UARTParseSetCommand(void) {
 	switch (commandLine[1]) {
 	case 'I':
 	case 'i': {
-		nRF24L01PInit();
 		unsigned char *c = commandLine + 2;
 		if (*c == 't' || *c == 'T') {
-			RFdisable();
-			RFsetTransmitMode();
-			RFenable();
+			c++;
+			nRF24L01PInit(1);
+			if (*c == '1') {
+				RFenableNoACKTX(true);
+				RFenableAutoRetransmit(0,0);
+				RFdisableAutoAcknowledge();
+			}
+			throughMode = 2;
+		} else {
+			nRF24L01PInit(0);
+			if (*c == '1') {
+				RFdisableAutoAcknowledge();
+			}
+			throughMode = 1;
 		}
-		break;
-	}
-	case 'T':
-	case 't': {
-		RFpushDataToBuffer(commandLine + 2, commandLinePointer - 2);
 		break;
 	}
 	case 'U':

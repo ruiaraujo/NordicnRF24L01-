@@ -40,12 +40,11 @@
 
 /*
  * The state variable is a Bitfield
- * since it will amke it easier for us to know which command to send depending on the mode
+ * since it will make it easier for us to know which command to send depending on the mode
  * Bit 0  - Power mode
  * Bit 1 - RX mode
  * Bit 2 - TX mode
- * Bit 3 - transmitting
- * Bit 4 - NO ACK - only appliable on TX mode
+ * Bit 3 - NO ACK - only applicable on TX mode
  */
 
 typedef enum {
@@ -54,8 +53,7 @@ typedef enum {
 	NRF24L01P_MODE_STANDBY,
 	NRF24L01P_MODE_RX = 0x2,
 	NRF24L01P_MODE_TX = 0x4,
-	NRF24L01P_MODE_TRANSMITTING = 0x8, // active transmitting
-	NRF24L01P_MODE_TX_NO_ACK = 0x10, // active transmitting
+	NRF24L01P_MODE_TX_NO_ACK = 0x8, // no ACK in TX mode
 } nRF24L01P_Mode_Type;
 
 /*
@@ -155,7 +153,7 @@ typedef enum {
 
 struct NRF24L01P {
 	uint32_t mode;
-	int ACKPayloadsinTXFIFO;
+	int payloadsinTXFIFO;
 	volatile int transmissionTimeout;
 };
 
@@ -163,8 +161,17 @@ extern struct NRF24L01P nRF24L01P;
 
 /**
  * nRF24L01+ Single Chip 2.4GHz Transceiver from Nordic Semiconductor.
+ *
+ * @param transmitMode if 0 it will start in receive mode
  */
-void nRF24L01PInit();
+void nRF24L01PInit(unsigned char transmitMode);
+
+/**
+ * Function to be called on the main loop.
+ *
+ * Checks for timeouts in data in the buffer and checks for new IRQs
+ */
+void RFiterate();
 
 /**
  * Set the RF frequency.
@@ -307,10 +314,12 @@ void RFenable(void);
  */
 void RFdisable(void);
 
-
-void RFsetTransmittingMode();
-void RFsetNormalMode();
+/**
+ * In case of failed transmission, force the transceiver to retransmit
+ * the last payload
+ */
 void RFretransmistLastPayload();
+
 /**
  * Transmit data
  *
@@ -329,12 +338,13 @@ bool RFisTXBufferEmpty();
 
 /**
  * Move data from the library buffer to the Nordic chip
- * In RX mode it migth not move any data depending on the state of the
+ * Depending on the state of the TX FIFO, data may be moved or not
  *
  * @param pipe Only used in RX mode, it specifies which pipe
  * 			   is the ACK payload for.
+ * @return true if data was actually moved
  */
-void RFmoveBufferToTransmission(int pipe);
+bool RFmoveBufferToTransmission(int pipe);
 
 /**
  * Determine if there is data available to read
@@ -364,9 +374,11 @@ void RFdisableAutoAcknowledge(void);
 void RFenableAutoAcknowledge(int pipe);
 
 /**
+ * Enable the NO ACK transmission mode
  *
+ * @param enable if true, packets will be sent without waiting for ack
  */
-void RFenableACKTX(bool enable);
+void RFenableNoACKTX(bool enable);
 
 /**
  * Disable AutoRetransmit function
